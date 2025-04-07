@@ -16,32 +16,33 @@ int main(void)
     if (!(dpy = XOpenDisplay(0x0)))
         return 1;
 
-    // Fare imlecini değiştirmek için bir imleç oluşturuyoruz
-    // XCreateFontCursor fonksiyonu ile fare imlecini sol ok imleci olarak ayarlıyoruz.
+    /* 
+    Fare imlecini değiştirmek için bir imleç oluşturuyoruz
+    XCreateFontCursor fonksiyonu ile fare imlecini sol ok imleci olarak ayarlıyoruz. */
     Cursor cursor = XCreateFontCursor(dpy, XC_left_ptr);
 
     Window root = DefaultRootWindow(dpy);
 
-    /*  XDefineCursor fonksiyonu ile fare imlecini değiştirdik.
-        Fare imleci, XC_left_ptr ile sol ok imleci olarak ayarlandı.
-        Bu, fare imlecinin görünümünü değiştirmek için kullanılır.
-    */
+    /* 
+    XDefineCursor fonksiyonu ile fare imlecini değiştirdik.
+    Fare imleci, XC_left_ptr ile sol ok imleci olarak ayarlandı.
+    Bu, fare imlecinin görünümünü değiştirmek için kullanılır. */
     XDefineCursor(dpy, root, cursor);
 
-    /*  Klavye ve fare olaylarını yakala
-        XGrabKey ve XGrabButton fonksiyonları ile tuş ve fare olaylarını yakalıyoruz.
-        Bu olayları yakalayarak, belirli tuşlara veya fare butonlarına basıldığında
-        belirli işlemleri gerçekleştirebiliriz.
-    */
+    /*  
+    Klavye ve fare olaylarını yakala
+    XGrabKey ve XGrabButton fonksiyonları ile tuş ve fare olaylarını yakalıyoruz.
+    Bu olayları yakalayarak, belirli tuşlara veya fare butonlarına basıldığında
+    belirli işlemleri gerçekleştirebiliriz. */
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("F1")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("q")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("p")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
 
-    /*  Ses kontrolleri için tuşları yakala
-        XF86AudioRaiseVolume, XF86AudioLowerVolume ve XF86AudioMute tuşları
-        genellikle klavye üzerinde bulunur ve ses seviyesini artırmak, azaltmak
-        ve sessize almak için kullanılır.
-     */
+    /*  
+    Ses kontrolleri için tuşları yakala
+    XF86AudioRaiseVolume, XF86AudioLowerVolume ve XF86AudioMute tuşları
+    genellikle klavye üzerinde bulunur ve ses seviyesini artırmak, azaltmak
+    ve sessize almak için kullanılır. */
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioRaiseVolume")), 0, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioLowerVolume")), 0, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioMute")), 0, root, True, GrabModeAsync, GrabModeAsync);
@@ -60,11 +61,11 @@ int main(void)
 
     for (;;)
     {
-        /*  XNextEvent fonksiyonu ile olayları dinliyoruz.
-            Olaylar geldiğinde, olay türüne göre işlemler yapıyoruz.
-            Örneğin, bir tuşa basıldığında veya fare butonuna tıklandığında
-            belirli işlemler gerçekleştiriyoruz.
-        */
+        /*  
+        XNextEvent fonksiyonu ile olayları dinliyoruz.
+        Olaylar geldiğinde, olay türüne göre işlemler yapıyoruz.
+        Örneğin, bir tuşa basıldığında veya fare butonuna tıklandığında
+        belirli işlemler gerçekleştiriyoruz. */
         XNextEvent(dpy, &ev);
 
         // Olay türüne göre işlemler yapıyoruz
@@ -120,14 +121,17 @@ int main(void)
             else if (ev.xkey.keycode == vol_up)
             {
                 system("pactl set-sink-volume @DEFAULT_SINK@ +5%");
+                system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o '[0-9]\\+%' | head -n1)\" -t 1000");
             }
             else if (ev.xkey.keycode == vol_down)
             {
                 system("pactl set-sink-volume @DEFAULT_SINK@ -5%");
+                system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o '[0-9]\\+%' | head -n1)\" -t 1000");
             }
             else if (ev.xkey.keycode == mute)
             {
                 system("pactl set-sink-mute @DEFAULT_SINK@ toggle");
+                system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-mute @DEFAULT_SINK@ | grep -q 'yes' && echo 'Sessiz' || echo 'Ses Açık')\" -t 1000");
             }
         }
 
