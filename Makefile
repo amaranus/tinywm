@@ -13,3 +13,6 @@ uninstall:
 
 clean:
 	rm -f tinywm
+
+run:
+	startx ~/.xinitrc -- /usr/bin/Xephyr :100 -ac -screen 1024x768 -host-cursor

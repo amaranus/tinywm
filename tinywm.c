@@ -2,9 +2,151 @@
 #include <X11/cursorfont.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <X11/Xatom.h>
 
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MODKEY Mod1Mask
+#define NUM_WORKSPACES 5
+
+// Workspace'lerdeki pencereleri tutmak için yapılar
+typedef struct {
+    Window *windows;      // Workspace'deki pencereler
+    int num_windows;      // Pencere sayısı
+    int capacity;        // Dizinin kapasitesi
+} Workspace;
+
+Workspace workspaces[NUM_WORKSPACES];
+unsigned long current_workspace = 0;
+
+void init_workspaces(void) {
+    for (int i = 0; i < NUM_WORKSPACES; i++) {
+        workspaces[i].windows = malloc(sizeof(Window) * 10);  // Başlangıç kapasitesi
+        workspaces[i].num_windows = 0;
+        workspaces[i].capacity = 10;
+    }
+}
+
+void add_window_to_workspace(Window win, int workspace) {
+    if (workspace < 0 || workspace >= NUM_WORKSPACES) return;
+    
+    Workspace *ws = &workspaces[workspace];
+    
+    // Pencere zaten bu workspace'de mi kontrol et
+    for (int i = 0; i < ws->num_windows; i++) {
+        if (ws->windows[i] == win) return;
+    }
+    
+    // Kapasite kontrolü
+    if (ws->num_windows >= ws->capacity) {
+        ws->capacity *= 2;
+        Window *new_windows = realloc(ws->windows, sizeof(Window) * ws->capacity);
+        if (new_windows) {
+            ws->windows = new_windows;
+        } else {
+            return; // Bellek hatası
+        }
+    }
+    
+    ws->windows[ws->num_windows++] = win;
+}
+
+void remove_window_from_workspace(Window win, int workspace) {
+    Workspace *ws = &workspaces[workspace];
+    
+    for (int i = 0; i < ws->num_windows; i++) {
+        if (ws->windows[i] == win) {
+            // Pencereyi listeden kaldır
+            for (int j = i; j < ws->num_windows - 1; j++) {
+                ws->windows[j] = ws->windows[j + 1];
+            }
+            ws->num_windows--;
+            break;
+        }
+    }
+}
+
+void switch_workspace(Display *dpy, int new_workspace) {
+    if (new_workspace < 0 || new_workspace >= NUM_WORKSPACES) return;
+    
+    Window root = DefaultRootWindow(dpy);
+    Atom net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
+    Atom net_wm_window_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
+    Atom net_wm_window_type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    
+    // Mevcut workspace'deki pencereleri gizle
+    for (int i = 0; i < workspaces[current_workspace].num_windows; i++) {
+        Window win = workspaces[current_workspace].windows[i];
+        if (win != None) {
+            // Pencerenin tipini kontrol et
+            Atom actual_type;
+            int actual_format;
+            unsigned long nitems, bytes_after;
+            Atom *data = NULL;
+            
+            // Pencere dock tipi mi kontrol et (Polybar gibi)
+            if (XGetWindowProperty(dpy, win, net_wm_window_type, 0, 1,
+                False, XA_ATOM, &actual_type, &actual_format,
+                &nitems, &bytes_after, (unsigned char **)&data) == Success) {
+                
+                if (data) {
+                    // Eğer pencere dock tipinde değilse gizle
+                    if (*data != net_wm_window_type_dock) {
+                        XUnmapWindow(dpy, win);
+                    }
+                    XFree(data);
+                } else {
+                    // Pencere tipi belirtilmemişse gizle
+                    XUnmapWindow(dpy, win);
+                }
+            }
+        }
+    }
+    
+    // Workspace'i değiştir
+    current_workspace = new_workspace;
+    
+    // Yeni workspace'deki pencereleri göster
+    for (int i = 0; i < workspaces[new_workspace].num_windows; i++) {
+        Window win = workspaces[new_workspace].windows[i];
+        if (win != None) {
+            // Pencerenin tipini kontrol et
+            Atom actual_type;
+            int actual_format;
+            unsigned long nitems, bytes_after;
+            Atom *data = NULL;
+            
+            // Dock tipi olmayan pencereleri göster
+            if (XGetWindowProperty(dpy, win, net_wm_window_type, 0, 1,
+                False, XA_ATOM, &actual_type, &actual_format,
+                &nitems, &bytes_after, (unsigned char **)&data) == Success) {
+                
+                if (data) {
+                    // Eğer pencere dock tipinde değilse göster
+                    if (*data != net_wm_window_type_dock) {
+                        XMapWindow(dpy, win);
+                    }
+                    XFree(data);
+                } else {
+                    // Pencere tipi belirtilmemişse göster
+                    XMapWindow(dpy, win);
+                }
+            }
+        }
+    }
+    
+    // EWMH özelliğini güncelle
+    XChangeProperty(dpy, root, net_current_desktop, XA_CARDINAL, 32,
+                   PropModeReplace, (unsigned char *)&new_workspace, 1);
+    
+    XSync(dpy, False);
+}
+
+void cleanup_workspaces(void) {
+    for (int i = 0; i < NUM_WORKSPACES; i++) {
+        free(workspaces[i].windows);
+    }
+}
 
 int main(void)
 {
@@ -16,12 +158,62 @@ int main(void)
     if (!(dpy = XOpenDisplay(0x0)))
         return 1;
 
+    // EWMH atomlarını tanımla
+    Atom net_supported, net_current_desktop, net_number_of_desktops, net_client_list;
+    Atom net_active_window, net_wm_window_type, net_wm_state, net_wm_name;
+    
+    // Atomları başlat
+    net_supported = XInternAtom(dpy, "_NET_SUPPORTED", False);
+    net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
+    net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
+    net_client_list = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
+    net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
+    net_wm_window_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
+    net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
+    net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
+
+    // Root window'u tanımla
+    Window root = DefaultRootWindow(dpy);
+
+    // Workspace sayısını ayarla
+    unsigned long desktop_num = NUM_WORKSPACES;
+    XChangeProperty(dpy, root, net_number_of_desktops, XA_CARDINAL, 32,
+                   PropModeReplace, (unsigned char *)&desktop_num, 1);
+
+    // Mevcut workspace'i 0 olarak ayarla
+    unsigned long current_desktop = 0;
+    XChangeProperty(dpy, root, net_current_desktop, XA_CARDINAL, 32,
+                   PropModeReplace, (unsigned char *)&current_desktop, 1);
+
+    // Desteklenen EWMH özelliklerini bildir
+    Atom supported[] = {
+        net_supported,
+        net_current_desktop,
+        net_number_of_desktops,
+        net_client_list,
+        net_active_window,
+        net_wm_window_type,
+        net_wm_state,
+        net_wm_name
+    };
+    XChangeProperty(dpy, root, net_supported, XA_ATOM, 32,
+                   PropModeReplace, (unsigned char *)supported,
+                   sizeof(supported) / sizeof(supported[0]));
+
+    // Workspace değiştirme tuşlarını tanımla
+    for (int i = 0; i < NUM_WORKSPACES; i++) {
+        char key[2];
+        snprintf(key, sizeof(key), "%d", i + 1);
+        XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
+                 MODKEY, root, True, GrabModeAsync, GrabModeAsync);
+    }
+
     /* 
     Fare imlecini değiştirmek için bir imleç oluşturuyoruz
     XCreateFontCursor fonksiyonu ile fare imlecini sol ok imleci olarak ayarlıyoruz. */
     Cursor cursor = XCreateFontCursor(dpy, XC_left_ptr);
 
-    Window root = DefaultRootWindow(dpy);
+    
 
     /* 
     XDefineCursor fonksiyonu ile fare imlecini değiştirdik.
@@ -56,6 +248,9 @@ int main(void)
 
     // Focus follow pointer için root'a da EnterWindowMask ekle
     XSelectInput(dpy, root, SubstructureNotifyMask | EnterWindowMask);
+
+    // Workspace'leri başlat
+    init_workspaces();
 
     start.subwindow = None;
 
@@ -133,6 +328,15 @@ int main(void)
                 system("pactl set-sink-mute @DEFAULT_SINK@ toggle");
                 system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-mute @DEFAULT_SINK@ | grep -q 'yes' && echo 'Sessiz' || echo 'Ses Açık')\" -t 1000");
             }
+            for (int i = 0; i < NUM_WORKSPACES; i++) {
+                char key[2];
+                snprintf(key, sizeof(key), "%d", i + 1);
+                if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym(key)) && 
+                    (ev.xkey.state & MODKEY)) {
+                    switch_workspace(dpy, i);
+                    break;
+                }
+            }
         }
 
         // Fare olayları için işlemler
@@ -168,15 +372,10 @@ int main(void)
         {
             start.subwindow = None;
         }
-        else if (ev.type == MapNotify && ev.xmap.event == root)
-        {
-            XWindowAttributes wattr;
-            XGetWindowAttributes(dpy, ev.xmap.window, &wattr);
-
-            if (!wattr.override_redirect)
-            {
+        else if (ev.type == MapNotify) {
+            if (!ev.xmap.override_redirect) {
+                add_window_to_workspace(ev.xmap.window, current_workspace);
                 XSelectInput(dpy, ev.xmap.window, EnterWindowMask);
-                XSetInputFocus(dpy, ev.xmap.window, RevertToPointerRoot, CurrentTime);
             }
         }
         else if (ev.type == EnterNotify && ev.xcrossing.window != root)
@@ -188,6 +387,10 @@ int main(void)
             {
                 XSetInputFocus(dpy, ev.xcrossing.window, RevertToPointerRoot, CurrentTime);
             }
+        }
+        else if (ev.type == UnmapNotify) {
+            // Pencere kapatıldığında workspace'den kaldır
+            remove_window_from_workspace(ev.xunmap.window, current_workspace);
         }
     }
 }
