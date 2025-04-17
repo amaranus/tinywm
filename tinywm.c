@@ -175,12 +175,12 @@ int main(void)
         return 1;
 
     // EWMH atomlarını tanımla
-    Atom net_supported, net_current_desktop, net_number_of_desktops, net_client_list;
+    Atom net_supported = XInternAtom(dpy, "_NET_SUPPORTED", False);
+    Atom net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
+    Atom net_number_of_desktops, net_client_list;
     Atom net_active_window, net_wm_window_type, net_wm_state, net_wm_name;
     
     // Atomları başlat
-    net_supported = XInternAtom(dpy, "_NET_SUPPORTED", False);
-    net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
     net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
     net_client_list = XInternAtom(dpy, "_NET_CLIENT_LIST", False);
     net_active_window = XInternAtom(dpy, "_NET_ACTIVE_WINDOW", False);
@@ -275,7 +275,7 @@ int main(void)
                 GrabModeAsync, GrabModeAsync, None, None);
 
     // Focus follow pointer için root'a da EnterWindowMask ekle
-    XSelectInput(dpy, root, SubstructureNotifyMask | EnterWindowMask);
+    XSelectInput(dpy, root, SubstructureNotifyMask | EnterWindowMask | PropertyChangeMask);
 
     // Workspace'leri başlat
     init_workspaces();
@@ -430,6 +430,16 @@ int main(void)
         else if (ev.type == UnmapNotify) {
             // Pencere kapatıldığında workspace'den kaldır
             remove_window_from_workspace(ev.xunmap.window, current_workspace);
+        }
+        // main fonksiyonundaki olay döngüsüne ekleyin (diğer else if bloklarının yanına)
+        else if (ev.type == ClientMessage) {
+            if (ev.xclient.message_type == net_current_desktop) {
+                // Polybar'dan gelen workspace değiştirme isteği
+                unsigned int new_workspace = (unsigned int)ev.xclient.data.l[0];
+                if (new_workspace < NUM_WORKSPACES) {
+                    switch_workspace(dpy, new_workspace);
+                }
+            }
         }
     }
 }
