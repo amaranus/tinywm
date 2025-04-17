@@ -148,6 +148,22 @@ void cleanup_workspaces(void) {
     }
 }
 
+void move_window_to_workspace(Display *dpy, Window win, int new_workspace) {
+    if (new_workspace < 0 || new_workspace >= NUM_WORKSPACES) return;
+    if (win == None) return;
+
+    // Önce pencereyi eski workspace'den kaldır
+    remove_window_from_workspace(win, current_workspace);
+
+    // Pencereyi yeni workspace'e ekle
+    add_window_to_workspace(win, new_workspace);
+
+    // Eğer pencere farklı bir workspace'e taşınıyorsa gizle
+    if (new_workspace != current_workspace) {
+        XUnmapWindow(dpy, win);
+    }
+}
+
 int main(void)
 {
     Display *dpy;
@@ -206,6 +222,18 @@ int main(void)
         snprintf(key, sizeof(key), "%d", i + 1);
         XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
                  MODKEY, root, True, GrabModeAsync, GrabModeAsync);
+    }
+
+    // Workspace tuşlarını tanımla (main fonksiyonunda, diğer XGrabKey çağrılarının yanına)
+    for (int i = 0; i < NUM_WORKSPACES; i++) {
+        char key[2];
+        snprintf(key, sizeof(key), "%d", i + 1);
+        // Normal workspace değiştirme için Alt+[1-5]
+        XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
+                 MODKEY, root, True, GrabModeAsync, GrabModeAsync);
+        // Pencere taşıma için Alt+Shift+[1-5]
+        XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
+                 MODKEY | ShiftMask, root, True, GrabModeAsync, GrabModeAsync);
     }
 
     /* 
@@ -331,9 +359,20 @@ int main(void)
             for (int i = 0; i < NUM_WORKSPACES; i++) {
                 char key[2];
                 snprintf(key, sizeof(key), "%d", i + 1);
-                if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym(key)) && 
-                    (ev.xkey.state & MODKEY)) {
-                    switch_workspace(dpy, i);
+                if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym(key))) {
+                    if (ev.xkey.state & ShiftMask) {
+                        // Alt+Shift+[1-5]: Pencereyi workspace'e taşı
+                        if (ev.xkey.subwindow != None) {
+                            move_window_to_workspace(dpy, ev.xkey.subwindow, i);
+                            // Bildirim göster
+                            char msg[64];
+                            snprintf(msg, sizeof(msg), "Pencere %d. workspace'e taşındı", i + 1);
+                            system("notify-send 'Workspace' \"$msg\" -t 1000");
+                        }
+                    } else {
+                        // Alt+[1-5]: Workspace değiştir
+                        switch_workspace(dpy, i);
+                    }
                     break;
                 }
             }
