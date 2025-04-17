@@ -9,21 +9,44 @@
 #define MODKEY Mod1Mask
 #define NUM_WORKSPACES 5
 
-// Workspace'lerdeki pencereleri tutmak için yapılar
+// Dizilim modları için enum'u güncelle
+typedef enum {
+    LAYOUT_FLOAT,    // Serbest dizilim (varsayılan)
+    LAYOUT_TILE_V,   // Dikey dizilim
+    LAYOUT_TILE_H    // Yatay dizilim
+} LayoutMode;
+
+// Gaps ayarları için yapı
+typedef struct {
+    int inner;  // Pencereler arası boşluk
+    int outer;  // Ekran kenarlarından boşluk
+} Gaps;
+
+// Workspace yapısını güncelle
 typedef struct {
     Window *windows;      // Workspace'deki pencereler
     int num_windows;      // Pencere sayısı
     int capacity;        // Dizinin kapasitesi
+    LayoutMode layout;   // Dizilim modu
+    Gaps gaps;          // Boşluk ayarları
 } Workspace;
+
+// Varsayılan değerler
+#define DEFAULT_INNER_GAP 10
+#define DEFAULT_OUTER_GAP 20
 
 Workspace workspaces[NUM_WORKSPACES];
 unsigned long current_workspace = 0;
 
+// init_workspaces fonksiyonunu güncelle
 void init_workspaces(void) {
     for (int i = 0; i < NUM_WORKSPACES; i++) {
-        workspaces[i].windows = malloc(sizeof(Window) * 10);  // Başlangıç kapasitesi
+        workspaces[i].windows = malloc(sizeof(Window) * 10);
         workspaces[i].num_windows = 0;
         workspaces[i].capacity = 10;
+        workspaces[i].layout = LAYOUT_FLOAT;  // Varsayılan float mod
+        workspaces[i].gaps.inner = DEFAULT_INNER_GAP;
+        workspaces[i].gaps.outer = DEFAULT_OUTER_GAP;
     }
 }
 
@@ -164,6 +187,74 @@ void move_window_to_workspace(Display *dpy, Window win, int new_workspace) {
     }
 }
 
+void arrange_windows_tiled(Display *dpy, Workspace *ws, int horizontal) {
+    if (ws->num_windows == 0) return;
+
+    Window root = DefaultRootWindow(dpy);
+    XWindowAttributes root_attr;
+    XGetWindowAttributes(dpy, root, &root_attr);
+
+    int x = ws->gaps.outer;
+    int y = ws->gaps.outer;
+    int available_width = root_attr.width - (2 * ws->gaps.outer);
+    int available_height = root_attr.height - (2 * ws->gaps.outer);
+
+    if (horizontal) {
+        // Yatay dizilim
+        int width = available_width;
+        int height = (available_height - ((ws->num_windows - 1) * ws->gaps.inner)) / ws->num_windows;
+
+        for (int i = 0; i < ws->num_windows; i++) {
+            XMoveResizeWindow(dpy, ws->windows[i], x, y, width, height);
+            y += height + ws->gaps.inner;
+        }
+    } else {
+        // Dikey dizilim
+        int width = (available_width - ((ws->num_windows - 1) * ws->gaps.inner)) / ws->num_windows;
+        int height = available_height;
+
+        for (int i = 0; i < ws->num_windows; i++) {
+            XMoveResizeWindow(dpy, ws->windows[i], x, y, width, height);
+            x += width + ws->gaps.inner;
+        }
+    }
+}
+
+// Pencereyi merkeze yerleştirme fonksiyonunu ekle
+void center_window(Display *dpy, Window win) {
+    Window root = DefaultRootWindow(dpy);
+    XWindowAttributes root_attr, win_attr;
+    
+    XGetWindowAttributes(dpy, root, &root_attr);
+    XGetWindowAttributes(dpy, win, &win_attr);
+    
+    int x = (root_attr.width - win_attr.width) / 2;
+    int y = (root_attr.height - win_attr.height) / 2;
+    
+    XMoveWindow(dpy, win, x, y);
+}
+
+// toggle_layout fonksiyonunu güncelle
+void toggle_layout(Display *dpy) {
+    Workspace *ws = &workspaces[current_workspace];
+    
+    if (ws->layout == LAYOUT_FLOAT) {
+        ws->layout = LAYOUT_TILE_V;  // Float'tan tile'a geçişte dikey mod
+        arrange_windows_tiled(dpy, ws, 0);  // 0 = dikey dizilim
+    } else {
+        ws->layout = LAYOUT_FLOAT;
+    }
+}
+
+void set_layout(Display *dpy, LayoutMode mode) {
+    Workspace *ws = &workspaces[current_workspace];
+    ws->layout = mode;
+    
+    if (mode != LAYOUT_FLOAT) {
+        arrange_windows_tiled(dpy, ws, mode == LAYOUT_TILE_H);
+    }
+}
+
 int main(void)
 {
     Display *dpy;
@@ -179,6 +270,7 @@ int main(void)
     Atom net_current_desktop = XInternAtom(dpy, "_NET_CURRENT_DESKTOP", False);
     Atom net_number_of_desktops, net_client_list;
     Atom net_active_window, net_wm_window_type, net_wm_state, net_wm_name;
+    Atom net_wm_window_type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
     
     // Atomları başlat
     net_number_of_desktops = XInternAtom(dpy, "_NET_NUMBER_OF_DESKTOPS", False);
@@ -235,6 +327,11 @@ int main(void)
         XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
                  MODKEY | ShiftMask, root, True, GrabModeAsync, GrabModeAsync);
     }
+
+    // Main fonksiyonunda tuş tanımlamaları
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("space")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("h")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
+    XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("v")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
 
     /* 
     Fare imlecini değiştirmek için bir imleç oluşturuyoruz
@@ -356,6 +453,15 @@ int main(void)
                 system("pactl set-sink-mute @DEFAULT_SINK@ toggle");
                 system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-mute @DEFAULT_SINK@ | grep -q 'yes' && echo 'Sessiz' || echo 'Ses Açık')\" -t 1000");
             }
+            else if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym("space"))) {
+                toggle_layout(dpy);
+            }
+            else if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym("h"))) {
+                set_layout(dpy, LAYOUT_TILE_H);
+            }
+            else if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym("v"))) {
+                set_layout(dpy, LAYOUT_TILE_V);
+            }
             for (int i = 0; i < NUM_WORKSPACES; i++) {
                 char key[2];
                 snprintf(key, sizeof(key), "%d", i + 1);
@@ -411,9 +517,40 @@ int main(void)
         {
             start.subwindow = None;
         }
+        // MapNotify olayını güncelleyelim
         else if (ev.type == MapNotify) {
             if (!ev.xmap.override_redirect) {
-                add_window_to_workspace(ev.xmap.window, current_workspace);
+                // Pencere dock tipi mi kontrol et
+                Atom actual_type;
+                int actual_format;
+                unsigned long nitems, bytes_after;
+                Atom *data = NULL;
+                
+                if (XGetWindowProperty(dpy, ev.xmap.window, net_wm_window_type, 0, 1,
+                    False, XA_ATOM, &actual_type, &actual_format,
+                    &nitems, &bytes_after, (unsigned char **)&data) == Success) {
+                    
+                    if (data) {
+                        if (*data != net_wm_window_type_dock) {
+                            add_window_to_workspace(ev.xmap.window, current_workspace);
+                            if (workspaces[current_workspace].layout == LAYOUT_FLOAT) {
+                                center_window(dpy, ev.xmap.window);
+                            } else {
+                                arrange_windows_tiled(dpy, &workspaces[current_workspace], 
+                                    workspaces[current_workspace].layout == LAYOUT_TILE_H);
+                            }
+                        }
+                        XFree(data);
+                    } else {
+                        add_window_to_workspace(ev.xmap.window, current_workspace);
+                        if (workspaces[current_workspace].layout == LAYOUT_FLOAT) {
+                            center_window(dpy, ev.xmap.window);
+                        } else {
+                            arrange_windows_tiled(dpy, &workspaces[current_workspace], 
+                                workspaces[current_workspace].layout == LAYOUT_TILE_H);
+                        }
+                    }
+                }
                 XSelectInput(dpy, ev.xmap.window, EnterWindowMask);
             }
         }
