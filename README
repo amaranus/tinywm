@@ -21,10 +21,13 @@ Usage:
   Focus follows pointer.
   Alt+Button1, drag: interactive window move
   Alt+Button3, drag: interactive window resize
-  Alt+F1: raise focused window
-  Alt+q: destroy focused window
-  Alt+d: open dmenu
+  Alt+F1: Raise focused window
+  Alt+q: Destroy focused window
+  Alt+d: Open dmenu
   Alt+Any Mouse Button: raise and focus window
+  Alt+tab: Window transitions in a workspace
+  Alt+[1-5]: Cycles between five workspaces. (Default is 5 ws. It can be change.)
+  Alt+Shift+[1-5]: Moves windows to workspaces.
 
 Misc:
   

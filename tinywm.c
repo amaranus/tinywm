@@ -15,6 +15,8 @@ Atom net_wm_window_type;
 Atom net_wm_state;
 Atom net_wm_name;
 Atom net_wm_window_type_dock;
+Atom net_wm_window_type_menu;
+Atom net_wm_window_type_dialog;
 Atom wm_delete;
 Atom wm_protocols;
 
@@ -37,7 +39,7 @@ BarPosition bar_position = BAR_TOP; // Varsayılan olarak üstte
 #define MODKEY Mod1Mask
 #define NUM_WORKSPACES 5
 
-// Dizilim modları için enum'u güncelle
+// Dizilim modları için enum
 typedef enum {
     LAYOUT_FLOAT,    // Serbest dizilim (varsayılan)
     LAYOUT_TILE_V,   // Dikey dizilim
@@ -71,8 +73,35 @@ typedef struct {
 Workspace workspaces[NUM_WORKSPACES];
 unsigned long current_workspace = 0;
 
-// aktif pencereyi tutan global değişken ekleyelim (diğer global değişkenlerin yanına)
+// Aktif pencereyi tutan global değişken
 Window active_window = None;
+
+// Xlib hata işleyici
+int x_error_handler(Display *dpy, XErrorEvent *error) {
+    char error_msg[256];
+    XGetErrorText(dpy, error->error_code, error_msg, sizeof(error_msg));
+    fprintf(stderr, "X Error: %s (error code: %d, request code: %d, minor code: %d)\n",
+            error_msg, error->error_code, error->request_code, error->minor_code);
+    return 0; // Devam et, çökme
+}
+
+// Fonksiyon prototipleri
+void init_workspaces(void);
+void save_window_state(Display *dpy, Window win, WindowState *state);
+Bool is_movable_window(Display *dpy, Window win);
+void add_window_to_workspace(Display *dpy, Window win, int workspace);
+void remove_window_from_workspace(Display *dpy, Window win, int workspace);
+void switch_workspace(Display *dpy, int new_workspace);
+void cleanup_workspaces(void);
+void move_window_to_workspace(Display *dpy, Window win, int new_workspace);
+Bool has_dock_window(Display *dpy);
+void arrange_windows_tiled(Display *dpy, Workspace *ws, int horizontal);
+void toggle_layout(Display *dpy);
+void set_layout(Display *dpy, LayoutMode mode);
+void toggle_bar_position(Display *dpy);
+void focus_next_window(Display *dpy);
+void init_atoms(Display *dpy);
+int x_error_handler(Display *dpy, XErrorEvent *error);
 
 // init_workspaces fonksiyonunu güncelle
 void init_workspaces(void) {
@@ -89,12 +118,40 @@ void init_workspaces(void) {
 // Pencere konumunu kaydet
 void save_window_state(Display *dpy, Window win, WindowState *state) {
     XWindowAttributes attr;
-    XGetWindowAttributes(dpy, win, &attr);
-    state->id = win;
-    state->x = attr.x;
-    state->y = attr.y;
-    state->width = attr.width;
-    state->height = attr.height;
+    if (XGetWindowAttributes(dpy, win, &attr)) {
+        state->id = win;
+        state->x = attr.x;
+        state->y = attr.y;
+        state->width = attr.width;
+        state->height = attr.height;
+    }
+}
+
+// Pencerenin taşınabilir ve tile modda düzenlenebilir olup olmadığını kontrol et
+Bool is_movable_window(Display *dpy, Window win) {
+    XWindowAttributes attr;
+    if (!XGetWindowAttributes(dpy, win, &attr) || attr.override_redirect) {
+        return False; // override_redirect pencereler taşınamaz
+    }
+
+    Atom actual_type;
+    int actual_format;
+    unsigned long nitems, bytes_after;
+    Atom *data = NULL;
+
+    if (XGetWindowProperty(dpy, win, net_wm_window_type, 0, 1,
+                           False, XA_ATOM, &actual_type, &actual_format,
+                           &nitems, &bytes_after, (unsigned char **)&data) == Success) {
+        if (data) {
+            Bool is_movable = (*data != net_wm_window_type_dock &&
+                              *data != net_wm_window_type_menu &&
+                              *data != net_wm_window_type_dialog);
+            XFree(data);
+            return is_movable;
+        }
+        XFree(data);
+    }
+    return True; // Varsayılan olarak taşınabilir
 }
 
 // Pencereyi workspace'e ekle
@@ -127,10 +184,15 @@ void add_window_to_workspace(Display *dpy, Window win, int workspace) {
     char command[100];
     snprintf(command, sizeof(command), "notify-send 'Taşıma' 'Taşınan alan: %d' -t 1000", workspace + 1);
     system(command);
+
+    // Tile moddaysak ve pencere taşınabilir ise düzeni güncelle
+    if (ws->layout != LAYOUT_FLOAT && is_movable_window(dpy, win)) {
+        arrange_windows_tiled(dpy, ws, ws->layout == LAYOUT_TILE_H);
+    }
 }
 
 // Pencereyi workspace'den kaldır
-void remove_window_from_workspace(Window win, int workspace) {
+void remove_window_from_workspace(Display *dpy, Window win, int workspace) {
     Workspace *ws = &workspaces[workspace];
     
     for (int i = 0; i < ws->num_windows; i++) {
@@ -140,6 +202,10 @@ void remove_window_from_workspace(Window win, int workspace) {
                 ws->windows[j] = ws->windows[j + 1];
             }
             ws->num_windows--;
+            // Tile moddaysak ve bu workspace aktifse düzeni güncelle
+            if (workspace == current_workspace && ws->layout != LAYOUT_FLOAT) {
+                arrange_windows_tiled(dpy, ws, ws->layout == LAYOUT_TILE_H);
+            }
             break;
         }
     }
@@ -168,8 +234,10 @@ void switch_workspace(Display *dpy, int new_workspace) {
                 &nitems, &bytes_after, (unsigned char **)&data) == Success) {
                 
                 if (data) {
-                    // Eğer pencere dock tipinde değilse gizle
-                    if (*data != net_wm_window_type_dock) {
+                    // Eğer pencere dock, menu veya dialog tipinde değilse gizle
+                    if (*data != net_wm_window_type_dock &&
+                        *data != net_wm_window_type_menu &&
+                        *data != net_wm_window_type_dialog) {
                         XUnmapWindow(dpy, win);
                     }
                     XFree(data);
@@ -208,8 +276,10 @@ void switch_workspace(Display *dpy, int new_workspace) {
                 &nitems, &bytes_after, (unsigned char **)&data) == Success) {
                 
                 if (data) {
-                    // Eğer pencere dock tipinde değilse göster
-                    if (*data != net_wm_window_type_dock) {
+                    // Eğer pencere dock, menu veya dialog tipinde değilse göster
+                    if (*data != net_wm_window_type_dock &&
+                        *data != net_wm_window_type_menu &&
+                        *data != net_wm_window_type_dialog) {
                         XMapWindow(dpy, state->id);
                     }
                     XFree(data);
@@ -235,10 +305,10 @@ void cleanup_workspaces(void) {
 
 void move_window_to_workspace(Display *dpy, Window win, int new_workspace) {
     if (new_workspace < 0 || new_workspace >= NUM_WORKSPACES) return;
-    if (win == None) return;
+    if (win == None || !is_movable_window(dpy, win)) return;
 
     // Önce pencereyi eski workspace'den kaldır
-    remove_window_from_workspace(win, current_workspace);
+    remove_window_from_workspace(dpy, win, current_workspace);
 
     // Pencereyi yeni workspace'e ekle
     add_window_to_workspace(dpy, win, new_workspace);
@@ -303,62 +373,34 @@ void arrange_windows_tiled(Display *dpy, Workspace *ws, int horizontal) {
         }
     }
 
+    // Tile modda düzenlenecek pencere sayısını hesapla
+    int tileable_windows = 0;
+    for (int i = 0; i < ws->num_windows; i++) {
+        if (is_movable_window(dpy, ws->windows[i].id)) {
+            tileable_windows++;
+        }
+    }
+    if (tileable_windows == 0) return;
+
     if (horizontal) {
         // Yatay dizilim
         int width = available_width;
-        int height = (available_height - ((ws->num_windows - 1) * ws->gaps.inner)) / ws->num_windows;
+        int height = (available_height - ((tileable_windows - 1) * ws->gaps.inner)) / tileable_windows;
 
         for (int i = 0; i < ws->num_windows; i++) {
-            // Pencere dock tipi mi kontrol et
-            Atom actual_type;
-            int actual_format;
-            unsigned long nitems, bytes_after;
-            Atom *data = NULL;
-            
-            Atom net_wm_window_type = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE", False);
-            if (XGetWindowProperty(dpy, ws->windows[i].id, net_wm_window_type, 0, 1,
-                False, XA_ATOM, &actual_type, &actual_format,
-                &nitems, &bytes_after, (unsigned char **)&data) == Success) {
-                
-                if (data) {
-                    if (*data != net_wm_window_type_dock) {
-                        XMoveResizeWindow(dpy, ws->windows[i].id, x, y, width, height);
-                        y += height + ws->gaps.inner;
-                    }
-                    XFree(data);
-                } else {
-                    XMoveResizeWindow(dpy, ws->windows[i].id, x, y, width, height);
-                    y += height + ws->gaps.inner;
-                }
-            }
+            if (!is_movable_window(dpy, ws->windows[i].id)) continue;
+            XMoveResizeWindow(dpy, ws->windows[i].id, x, y, width, height);
+            y += height + ws->gaps.inner;
         }
     } else {
         // Dikey dizilim
-        int width = (available_width - ((ws->num_windows - 1) * ws->gaps.inner)) / ws->num_windows;
+        int width = (available_width - ((tileable_windows - 1) * ws->gaps.inner)) / tileable_windows;
         int height = available_height;
 
         for (int i = 0; i < ws->num_windows; i++) {
-            // Pencere dock tipi mi kontrol et
-            Atom actual_type;
-            int actual_format;
-            unsigned long nitems, bytes_after;
-            Atom *data = NULL;
-            
-            if (XGetWindowProperty(dpy, ws->windows[i].id, net_wm_window_type, 0, 1,
-                False, XA_ATOM, &actual_type, &actual_format,
-                &nitems, &bytes_after, (unsigned char **)&data) == Success) {
-                
-                if (data) {
-                    if (*data != net_wm_window_type_dock) {
-                        XMoveResizeWindow(dpy, ws->windows[i].id, x, y, width, height);
-                        x += width + ws->gaps.inner;
-                    }
-                    XFree(data);
-                } else {
-                    XMoveResizeWindow(dpy, ws->windows[i].id, x, y, width, height);
-                    x += width + ws->gaps.inner;
-                }
-            }
+            if (!is_movable_window(dpy, ws->windows[i].id)) continue;
+            XMoveResizeWindow(dpy, ws->windows[i].id, x, y, width, height);
+            x += width + ws->gaps.inner;
         }
     }
 }
@@ -395,11 +437,11 @@ void toggle_bar_position(Display *dpy) {
     }
 }
 
-// pencere değiştirme fonksiyonu ekleyelim
+// Pencere değiştirme fonksiyonu
 void focus_next_window(Display *dpy) {
     Workspace *ws = &workspaces[current_workspace];
     
-    if (ws->num_windows <= 1) return;  // tek pencere veya pencere yoksa işlem yapma
+    if (ws->num_windows <= 1) return;  // Tek pencere veya pencere yoksa işlem yapma
     
     // Mevcut aktif pencerenin indeksini bul
     int current_index = -1;
@@ -414,25 +456,11 @@ void focus_next_window(Display *dpy) {
     int next_index = (current_index + 1) % ws->num_windows;
     Window next_window = ws->windows[next_index].id;
     
-    // Dock penceresi ise sonrakine geç
-    Atom actual_type;
-    int actual_format;
-    unsigned long nitems, bytes_after;
-    Atom *data = NULL;
-    
-    if (XGetWindowProperty(dpy, next_window, net_wm_window_type, 0, 1,
-        False, XA_ATOM, &actual_type, &actual_format,
-        &nitems, &bytes_after, (unsigned char **)&data) == Success) {
-        
-        if (data) {
-            if (*data == net_wm_window_type_dock) {
-                XFree(data);
-                next_index = (next_index + 1) % ws->num_windows;
-                next_window = ws->windows[next_index].id;
-            } else {
-                XFree(data);
-            }
-        }
+    // Dock, menu veya dialog penceresi ise sonrakine geç
+    while (!is_movable_window(dpy, next_window)) {
+        next_index = (next_index + 1) % ws->num_windows;
+        next_window = ws->windows[next_index].id;
+        if (next_index == current_index) break; // Döngüyü kır
     }
     
     // Pencereyi aktif et ve öne getir
@@ -440,19 +468,6 @@ void focus_next_window(Display *dpy) {
     XSetInputFocus(dpy, next_window, RevertToPointerRoot, CurrentTime);
     active_window = next_window;
 }
-
-// EWMH atomları için global tanımlamalar
-Atom net_supported;
-Atom net_current_desktop;
-Atom net_number_of_desktops;
-Atom net_client_list;
-Atom net_active_window;
-Atom net_wm_window_type;
-Atom net_wm_state;
-Atom net_wm_name;
-Atom net_wm_window_type_dock;
-Atom wm_delete;
-Atom wm_protocols;
 
 // Atomları başlatma fonksiyonu
 void init_atoms(Display *dpy) {
@@ -465,6 +480,8 @@ void init_atoms(Display *dpy) {
     net_wm_state = XInternAtom(dpy, "_NET_WM_STATE", False);
     net_wm_name = XInternAtom(dpy, "_NET_WM_NAME", False);
     net_wm_window_type_dock = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DOCK", False);
+    net_wm_window_type_menu = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_MENU", False);
+    net_wm_window_type_dialog = XInternAtom(dpy, "_NET_WM_WINDOW_TYPE_DIALOG", False);
     wm_delete = XInternAtom(dpy, "WM_DELETE_WINDOW", False);
     wm_protocols = XInternAtom(dpy, "WM_PROTOCOLS", False);
 }
@@ -475,8 +492,13 @@ int main(void) {
     XButtonEvent start;
     XEvent ev;
 
-    if (!(dpy = XOpenDisplay(0x0)))
+    if (!(dpy = XOpenDisplay(0x0))) {
+        fprintf(stderr, "Cannot open display\n");
         return 1;
+    }
+
+    // X hata işleyiciyi ayarla
+    XSetErrorHandler(x_error_handler);
 
     Window root = DefaultRootWindow(dpy);
 
@@ -508,67 +530,33 @@ int main(void) {
     XChangeProperty(dpy, root, net_current_desktop, XA_CARDINAL, 32,
                    PropModeReplace, (unsigned char *)&current_desktop, 1);
 
-    // Workspace değiştirme tuşlarını tanımla
+    // Workspace değiştirme ve taşıma tuşlarını tanımla
     for (int i = 0; i < NUM_WORKSPACES; i++) {
         char key[2];
         snprintf(key, sizeof(key), "%d", i + 1);
         XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
                  MODKEY, root, True, GrabModeAsync, GrabModeAsync);
-    }
-
-    // Workspace tuşlarını tanımla (main fonksiyonunda, diğer XGrabKey çağrılarının yanına)
-    for (int i = 0; i < NUM_WORKSPACES; i++) {
-        char key[2];
-        snprintf(key, sizeof(key), "%d", i + 1);
-        // Normal workspace değiştirme için Alt+[1-5]
-        XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
-                 MODKEY, root, True, GrabModeAsync, GrabModeAsync);
-        // Pencere taşıma için Alt+Shift+[1-5]
         XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym(key)), 
                  MODKEY | ShiftMask, root, True, GrabModeAsync, GrabModeAsync);
     }
 
-    // Main fonksiyonunda tuş tanımlamaları
+    // Diğer tuş tanımlamaları
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("space")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("h")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("v")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("b")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
-
-    // main fonksiyonunda tuş tanımlamalarının olduğu kısma ekleyin
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("Tab")), 
              MODKEY, root, True, GrabModeAsync, GrabModeAsync);
-
-    /* 
-    Fare imlecini değiştirmek için bir imleç oluşturuyoruz
-    XCreateFontCursor fonksiyonu ile fare imlecini sol ok imleci olarak ayarlıyoruz. */
-    Cursor cursor = XCreateFontCursor(dpy, XC_left_ptr);
-
-    
-
-    /* 
-    XDefineCursor fonksiyonu ile fare imlecini değiştirdik.
-    Fare imleci, XC_left_ptr ile sol ok imleci olarak ayarlandı.
-    Bu, fare imlecinin görünümünü değiştirmek için kullanılır. */
-    XDefineCursor(dpy, root, cursor);
-
-    /*  
-    Klavye ve fare olaylarını yakala
-    XGrabKey ve XGrabButton fonksiyonları ile tuş ve fare olaylarını yakalıyoruz.
-    Bu olayları yakalayarak, belirli tuşlara veya fare butonlarına basıldığında
-    belirli işlemleri gerçekleştirebiliriz. */
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("F1")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("q")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("p")), MODKEY, root, True, GrabModeAsync, GrabModeAsync);
 
-    /*  
-    Ses kontrolleri için tuşları yakala
-    XF86AudioRaiseVolume, XF86AudioLowerVolume ve XF86AudioMute tuşları
-    genellikle klavye üzerinde bulunur ve ses seviyesini artırmak, azaltmak
-    ve sessize almak için kullanılır. */
+    // Ses kontrolleri için tuşlar
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioRaiseVolume")), 0, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioLowerVolume")), 0, root, True, GrabModeAsync, GrabModeAsync);
     XGrabKey(dpy, XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioMute")), 0, root, True, GrabModeAsync, GrabModeAsync);
 
+    // Fare olayları
     XGrabButton(dpy, 1, MODKEY, root, True,
                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
                 GrabModeAsync, GrabModeAsync, None, None);
@@ -576,7 +564,11 @@ int main(void) {
                 ButtonPressMask | ButtonReleaseMask | PointerMotionMask,
                 GrabModeAsync, GrabModeAsync, None, None);
 
-    // Focus follow pointer için root'a da EnterWindowMask ekle
+    // Fare imleci
+    Cursor cursor = XCreateFontCursor(dpy, XC_left_ptr);
+    XDefineCursor(dpy, root, cursor);
+
+    // Root olayları
     XSelectInput(dpy, root, SubstructureNotifyMask | EnterWindowMask | PropertyChangeMask);
 
     // Workspace'leri başlat
@@ -584,18 +576,10 @@ int main(void) {
 
     start.subwindow = None;
 
-    for (;;)
-    {
-        /*  
-        XNextEvent fonksiyonu ile olayları dinliyoruz.
-        Olaylar geldiğinde, olay türüne göre işlemler yapıyoruz.
-        Örneğin, bir tuşa basıldığında veya fare butonuna tıklandığında
-        belirli işlemler gerçekleştiriyoruz. */
+    for (;;) {
         XNextEvent(dpy, &ev);
 
-        // Olay türüne göre işlemler yapıyoruz
-        if (ev.type == KeyPress)
-        {
+        if (ev.type == KeyPress) {
             KeyCode f1 = XKeysymToKeycode(dpy, XStringToKeysym("F1"));
             KeyCode q = XKeysymToKeycode(dpy, XStringToKeysym("q"));
             KeyCode p = XKeysymToKeycode(dpy, XStringToKeysym("p"));
@@ -603,55 +587,72 @@ int main(void) {
             KeyCode vol_down = XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioLowerVolume"));
             KeyCode mute = XKeysymToKeycode(dpy, XStringToKeysym("XF86AudioMute"));
 
-            if (ev.xkey.keycode == f1 && ev.xkey.subwindow != None)
-            {
+            if (ev.xkey.keycode == f1 && ev.xkey.subwindow != None && is_movable_window(dpy, ev.xkey.subwindow)) {
                 XRaiseWindow(dpy, ev.xkey.subwindow);
             }
-            // KeyPress olayında q tuşu kontrolünü güncelleyelim
-            else if (ev.xkey.keycode == q) {
-                // Aktif pencereyi kullan
-                if (active_window != None) {
-                    Atom *protocols;
-                    int n, deleted = 0;
-                    if (XGetWMProtocols(dpy, active_window, &protocols, &n)) {
-                        for (int i = 0; i < n; ++i) {
-                            if (protocols[i] == wm_delete) {
-                                XEvent msg;
-                                memset(&msg, 0, sizeof(msg));
-                                msg.xclient.type = ClientMessage;
-                                msg.xclient.window = active_window;
-                                msg.xclient.message_type = wm_protocols;
-                                msg.xclient.format = 32;
-                                msg.xclient.data.l[0] = wm_delete;
-                                msg.xclient.data.l[1] = CurrentTime;
-                                XSendEvent(dpy, active_window, False, NoEventMask, &msg);
-                                deleted = 1;
-                                break;
-                            }
-                        }
-                        XFree(protocols);
-                    }
+            else if (ev.xkey.keycode == q && active_window != None && is_movable_window(dpy, active_window)) {
+                // Pencereyi kapatmadan önce logla
+                fprintf(stderr, "Attempting to close window: %lu\n", active_window);
 
-                    if (!deleted)
-                        XDestroyWindow(dpy, active_window);
+                XWindowAttributes attr;
+                if (!XGetWindowAttributes(dpy, active_window, &attr)) {
+                    fprintf(stderr, "Failed to get attributes for window: %lu\n", active_window);
+                    active_window = None;
+                    continue;
                 }
+
+                // Root penceresi olmadığından emin ol
+                if (active_window == root) {
+                    fprintf(stderr, "Attempt to close root window blocked\n");
+                    active_window = None;
+                    continue;
+                }
+
+                Atom *protocols = NULL;
+                int n;
+                Bool deleted = False;
+
+                if (XGetWMProtocols(dpy, active_window, &protocols, &n)) {
+                    for (int i = 0; i < n; ++i) {
+                        if (protocols[i] == wm_delete) {
+                            XEvent msg;
+                            memset(&msg, 0, sizeof(msg));
+                            msg.xclient.type = ClientMessage;
+                            msg.xclient.window = active_window;
+                            msg.xclient.message_type = wm_protocols;
+                            msg.xclient.format = 32;
+                            msg.xclient.data.l[0] = wm_delete;
+                            msg.xclient.data.l[1] = CurrentTime;
+                            if (XSendEvent(dpy, active_window, False, NoEventMask, &msg)) {
+                                deleted = True;
+                            } else {
+                                fprintf(stderr, "Failed to send WM_DELETE_WINDOW to window: %lu\n", active_window);
+                            }
+                            break;
+                        }
+                    }
+                    XFree(protocols);
+                }
+
+                if (!deleted) {
+                    fprintf(stderr, "No WM_DELETE_WINDOW protocol, destroying window: %lu\n", active_window);
+                    XDestroyWindow(dpy, active_window);
+                }
+                XSync(dpy, False); // Hataları hemen işle
+                active_window = None; // Pencereyi sıfırla
             }
-            else if (ev.xkey.keycode == p)
-            {
+            else if (ev.xkey.keycode == p) {
                 system(LAUNCHER);
             }
-            else if (ev.xkey.keycode == vol_up)
-            {
+            else if (ev.xkey.keycode == vol_up) {
                 system("pactl set-sink-volume @DEFAULT_SINK@ +5%");
                 system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o '[0-9]\\+%' | head -n1)\" -t 1000");
             }
-            else if (ev.xkey.keycode == vol_down)
-            {
+            else if (ev.xkey.keycode == vol_down) {
                 system("pactl set-sink-volume @DEFAULT_SINK@ -5%");
                 system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-volume @DEFAULT_SINK@ | grep -o '[0-9]\\+%' | head -n1)\" -t 1000");
             }
-            else if (ev.xkey.keycode == mute)
-            {
+            else if (ev.xkey.keycode == mute) {
                 system("pactl set-sink-mute @DEFAULT_SINK@ toggle");
                 system("notify-send 'Ses Seviyesi' \"$(pactl get-sink-mute @DEFAULT_SINK@ | grep -q 'yes' && echo 'Sessiz' || echo 'Ses Açık')\" -t 1000");
             }
@@ -667,7 +668,6 @@ int main(void) {
             else if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym("b"))) {
                 toggle_bar_position(dpy);
             }
-            // KeyPress olayı içinde diğer tuş kontrollerinin yanına ekleyin
             else if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym("Tab"))) {
                 focus_next_window(dpy);
             }
@@ -675,106 +675,61 @@ int main(void) {
                 char key[2];
                 snprintf(key, sizeof(key), "%d", i + 1);
                 if (ev.xkey.keycode == XKeysymToKeycode(dpy, XStringToKeysym(key))) {
-                    if (ev.xkey.state & ShiftMask) {
-                        // Alt+Shift+[1-5]: Pencereyi workspace'e taşı
-                        if (ev.xkey.subwindow != None) {
-                            move_window_to_workspace(dpy, ev.xkey.subwindow, i);
-                        }
+                    if (ev.xkey.state & ShiftMask && ev.xkey.subwindow != None && is_movable_window(dpy, ev.xkey.subwindow)) {
+                        move_window_to_workspace(dpy, ev.xkey.subwindow, i);
                     } else {
-                        // Alt+[1-5]: Workspace değiştir
                         switch_workspace(dpy, i);
                     }
                     break;
                 }
             }
         }
-
-        // Fare olayları için işlemler
-        else if (ev.type == ButtonPress && ev.xbutton.subwindow == None)
-        {
-            start = ev.xbutton;
-            XSetInputFocus(dpy, root, RevertToPointerRoot, CurrentTime);
-            XRaiseWindow(dpy, root);
-        }
-        else if (ev.type == ButtonPress && ev.xbutton.subwindow != None)
-        {
+        else if (ev.type == ButtonPress && ev.xbutton.subwindow != None && is_movable_window(dpy, ev.xbutton.subwindow)) {
             XRaiseWindow(dpy, ev.xbutton.subwindow);
             XSetInputFocus(dpy, ev.xbutton.subwindow, RevertToPointerRoot, CurrentTime);
-
             XGetWindowAttributes(dpy, ev.xbutton.subwindow, &attr);
             start = ev.xbutton;
-
-            // Focus follow pointer'ı korumak için pencereye EnterWindowMask bağla
             XSelectInput(dpy, start.subwindow, EnterWindowMask);
         }
-        else if (ev.type == MotionNotify && start.subwindow != None)
-        {
+        else if (ev.type == MotionNotify && start.subwindow != None && is_movable_window(dpy, start.subwindow)) {
             int xdiff = ev.xbutton.x_root - start.x_root;
             int ydiff = ev.xbutton.y_root - start.y_root;
-
             XMoveResizeWindow(dpy, start.subwindow,
                               attr.x + (start.button == 1 ? xdiff : 0),
                               attr.y + (start.button == 1 ? ydiff : 0),
                               MAX(1, attr.width + (start.button == 3 ? xdiff : 0)),
                               MAX(1, attr.height + (start.button == 3 ? ydiff : 0)));
         }
-        else if (ev.type == ButtonRelease)
-        {
+        else if (ev.type == ButtonRelease) {
             start.subwindow = None;
         }
-        // MapNotify olayını düzeltelim
         else if (ev.type == MapNotify) {
             if (!ev.xmap.override_redirect) {
-                // Pencere dock tipi mi kontrol et
-                Atom actual_type;
-                int actual_format;
-                unsigned long nitems, bytes_after;
-                Atom *data = NULL;
-                
-                if (XGetWindowProperty(dpy, ev.xmap.window, net_wm_window_type, 0, 1,
-                    False, XA_ATOM, &actual_type, &actual_format,
-                    &nitems, &bytes_after, (unsigned char **)&data) == Success) {
-                    
-                    if (data) {
-                        if (*data != net_wm_window_type_dock) {
-                            add_window_to_workspace(dpy, ev.xmap.window, current_workspace);
-                            active_window = ev.xmap.window;  // Yeni pencereyi aktif pencere yap
-                            if (workspaces[current_workspace].layout != LAYOUT_FLOAT) {
-                                arrange_windows_tiled(dpy, &workspaces[current_workspace], 
-                                    workspaces[current_workspace].layout == LAYOUT_TILE_H);
-                            }
-                        }
-                        XFree(data);
-                    } else {
-                        add_window_to_workspace(dpy, ev.xmap.window, current_workspace);
-                        active_window = ev.xmap.window;  // Yeni pencereyi aktif pencere yap
-                        if (workspaces[current_workspace].layout != LAYOUT_FLOAT) {
-                            arrange_windows_tiled(dpy, &workspaces[current_workspace], 
-                                workspaces[current_workspace].layout == LAYOUT_TILE_H);
-                        }
-                    }
+                if (is_movable_window(dpy, ev.xmap.window)) {
+                    add_window_to_workspace(dpy, ev.xmap.window, current_workspace);
+                    active_window = ev.xmap.window;
+                } else {
+                    // Dialog pencereleri için sadece workspace'e ekle, tile düzenlemesi yapma
+                    add_window_to_workspace(dpy, ev.xmap.window, current_workspace);
                 }
                 XSelectInput(dpy, ev.xmap.window, EnterWindowMask);
             }
         }
-        // EnterNotify olayında fare ile pencere değiştirildiğinde aktif pencereyi güncelle
         else if (ev.type == EnterNotify && ev.xcrossing.window != root) {
             XWindowAttributes wattr;
-            XGetWindowAttributes(dpy, ev.xcrossing.window, &wattr);
-
-            if (!wattr.override_redirect) {
+            if (XGetWindowAttributes(dpy, ev.xcrossing.window, &wattr) && !wattr.override_redirect && is_movable_window(dpy, ev.xcrossing.window)) {
                 XSetInputFocus(dpy, ev.xcrossing.window, RevertToPointerRoot, CurrentTime);
-                active_window = ev.xcrossing.window;  // Fare ile seçilen pencereyi aktif pencere yap
+                active_window = ev.xcrossing.window;
             }
         }
         else if (ev.type == UnmapNotify) {
-            // Pencere kapatıldığında workspace'den kaldır
-            remove_window_from_workspace(ev.xunmap.window, current_workspace);
+            remove_window_from_workspace(dpy, ev.xunmap.window, current_workspace);
+            if (ev.xunmap.window == active_window) {
+                active_window = None;
+            }
         }
-        // main fonksiyonundaki olay döngüsüne ekleyin (diğer else if bloklarının yanına)
         else if (ev.type == ClientMessage) {
             if (ev.xclient.message_type == net_current_desktop) {
-                // Polybar'dan gelen workspace değiştirme isteği
                 unsigned int new_workspace = (unsigned int)ev.xclient.data.l[0];
                 if (new_workspace < NUM_WORKSPACES) {
                     switch_workspace(dpy, new_workspace);
@@ -782,4 +737,9 @@ int main(void) {
             }
         }
     }
+
+    // Cleanup (never reached in this loop, but for completeness)
+    cleanup_workspaces();
+    XCloseDisplay(dpy);
+    return 0;
 }
